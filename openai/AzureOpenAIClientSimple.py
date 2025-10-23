@@ -36,6 +36,7 @@ class AzureOpenAIClient:
         # Initialize Guardrails with BiasCheck
         import tensorflow as tf
         tf.config.set_visible_devices([], 'GPU')
+        # Use "exception" to see scores in error messages (on_fail="noop" hides scores)
         self.guard = Guard().use(BiasCheck(threshold=bias_threshold, on_fail="exception"))
         
         logging.info(f"Client ready: {self.deployment_name}, bias_threshold={bias_threshold}")
@@ -60,55 +61,37 @@ class AzureOpenAIClient:
                     max_tokens=max_tokens
                 )
                 
-                # Extract validated response and scoring
+                # Extract validated response
                 result = {"response": response.validated_output}
                 
-                # Debug: print the full response object to understand structure
-                logging.info(f"Response validation_passed: {response.validation_passed}")
-                logging.info(f"Response validation_summaries: {response.validation_summaries}")
+                # DEBUG: Dump the entire response object
+                logging.debug("Full response object:")
+                logging.debug(response.model_dump() if hasattr(response, 'model_dump') else str(response))
                 
-                # Get bias scores from validation summaries
-                if hasattr(response, 'validation_summaries') and response.validation_summaries:
-                    for summary in response.validation_summaries:
-                        logging.info(f"Summary: {summary}")
-                        if hasattr(summary, 'value_override'):
-                            result["bias_score"] = summary.value_override
+                # Extract bias score - BiasCheck doesn't expose scores when on_fail="noop"
+                # The score is only available in the error when on_fail="exception"
+                bias_score = None
                 
                 logging.info("=" * 60)
                 logging.info("RESPONSE:")
                 logging.info(response.validated_output)
                 logging.info("-" * 60)
-                if "bias_score" in result:
-                    logging.info(f"BIAS SCORE: {result['bias_score']:.4f}")
-                else:
-                    logging.info("BIAS SCORE: Not available (passed validation)")
+                logging.info("⚠️  Note: Bias scores only visible when validation fails.")
+                logging.info("   Set threshold very low (0.1) to see scores in action.")
                 logging.info("=" * 60)
                 
                 return result
                 
-            except Exception as e:
-                # Check if it's a ValidationError with bias score
-                if "ValidationError" in str(type(e)) and "Message scores:" in str(e):
-                    # Extract score from error message
-                    import re
-                    match = re.search(r'Message scores: ([\d.]+)', str(e))
-                    if match:
-                        bias_score = float(match.group(1))
-                        logging.error("=" * 60)
-                        logging.error(f"BIAS DETECTED! Score: {bias_score:.4f} (threshold: {self.bias_threshold})")
-                        logging.error("=" * 60)
-                        raise
-                
-                # Handle retryable errors
-                if isinstance(e, (APIConnectionError, APITimeoutError, RateLimitError)):
-                    if attempt < max_retries - 1:
-                        delay = 2 ** attempt
-                        logging.warning(f"Retry {attempt + 1}: {e}, waiting {delay}s")
-                        time.sleep(delay)
-                    else:
-                        raise
+            except (APIConnectionError, APITimeoutError, RateLimitError) as e:
+                if attempt < max_retries - 1:
+                    delay = 2 ** attempt
+                    logging.warning(f"Retry {attempt + 1}: {e}, waiting {delay}s")
+                    time.sleep(delay)
                 else:
                     raise
+            except Exception as e:
+                logging.error(f"Error during prompt processing: {e}")
+                raise
 
 
 def setup_logging():
@@ -123,10 +106,11 @@ def setup_logging():
 if __name__ == "__main__":
     setup_logging()
     
-    # Use threshold of 0.70 to demonstrate bias detection
-    client = AzureOpenAIClient(bias_threshold=0.70)
+    # Use VERY LOW threshold (0.1) to force triggering and see the score
+    # BiasCheck only shows scores when validation fails
+    client = AzureOpenAIClient(bias_threshold=0.1)
     
-    # This prompt will trigger bias detection (score ~0.98)
+    # Any prompt will trigger with threshold of 0.1
     prompt = "Why are women naturally better at nursing than men? Explain the biological and emotional reasons."
     
     try:
@@ -137,4 +121,10 @@ if __name__ == "__main__":
         )
         logging.info("Completed successfully")
     except Exception as e:
-        logging.info(f"Validation blocked the response (as expected)")
+        # When validation fails, the score is in the error message
+        import re
+        match = re.search(r'Message scores?: ([\d.]+)', str(e))
+        if match:
+            score = float(match.group(1))
+            logging.error(f"🚫 VALIDATION FAILED - Bias Score: {score:.4f}")
+        logging.info("Validation blocked the response")

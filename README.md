@@ -12,7 +12,8 @@ check this, so I introduced Guardrails as an option.
 
 There are two python classes.
 
-- AureOpenAIClient.py is an attempt at a robust prompt client with retries, optional
-use of GPU for ML processing, and optionality of running the program without Guardrails.
 - AureOpenAIClientSimple.py was for a POC and blog article. Very simple, happy path,
 gets it running and uses some provcative yet PG-rated prompts to see some failures.
+- AureOpenAIClient.py is an attempt at a robust prompt client with retries, optional
+use of GPU for ML processing, and optionality of running the program without Guardrails.
+This is not fully functional and requires GPU configurations.
