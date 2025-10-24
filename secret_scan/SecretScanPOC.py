@@ -41,16 +41,18 @@ class AzureOpenAIClient:
         )
         
         # Initialize Guardrails for INPUT validation (prompt scanning)
+        # on_fail="fix" will automatically redact secrets/PII instead of blocking
         self.input_guard = Guard().use_many(
             DetectPII(
                 pii_entities=["EMAIL_ADDRESS", "PHONE_NUMBER"],
-                on_fail="exception"
+                on_fail="fix"  # Auto-redact PII
             ),
-            SecretsPresent(on_fail="exception")
+            SecretsPresent(on_fail="fix")  # Auto-redact secrets
         )
         
         logging.info(f"Client ready: {self.deployment_name}")
         logging.info("Input validation enabled: SecretsPresent, DetectPII")
+        logging.info("Mode: AUTO-REDACT (secrets/PII will be replaced with ***)")
     
     def send_prompt(self, prompt: str, temperature: float = 0.7, 
                    max_tokens: int = 1000, max_retries: int = 3) -> dict:
@@ -64,14 +66,36 @@ class AzureOpenAIClient:
         logging.info("=" * 60)
         
         try:
-            # Validate the prompt text using parse() instead of __call__()
-            self.input_guard.parse(prompt)
-            logging.info("✅ INPUT VALIDATION PASSED - No secrets/PII detected")
+            # Validate and auto-redact the prompt text
+            validated = self.input_guard.parse(prompt)
+            cleaned_prompt = validated.validated_output
+            
+            if cleaned_prompt != prompt:
+                logging.warning("⚠️  SECRETS/PII DETECTED - Auto-redacted!")
+                logging.info(f"   Original length: {len(prompt)} chars")
+                logging.info(f"   Cleaned length: {len(cleaned_prompt)} chars")
+                logging.info("   Changes:")
+                # Show what was redacted
+                import difflib
+                diff = list(difflib.unified_diff(
+                    prompt.splitlines(keepends=True),
+                    cleaned_prompt.splitlines(keepends=True),
+                    lineterm='',
+                    n=0
+                ))
+                for line in diff[2:6]:  # Show first few diff lines
+                    if line.startswith('-') or line.startswith('+'):
+                        logging.info(f"     {line[:80]}")
+            else:
+                logging.info("✅ INPUT CLEAN - No secrets/PII detected")
+            
+            # Use the cleaned prompt for LLM
+            prompt_to_send = cleaned_prompt
+            
         except Exception as e:
             logging.error("=" * 60)
-            logging.error("🚫 INPUT BLOCKED - Secrets/PII detected!")
+            logging.error("🚫 INPUT VALIDATION ERROR")
             logging.error(f"   Error: {str(e)[:200]}")
-            logging.error("   ❌ NOT SENT to LLM (saved tokens!)")
             logging.error("=" * 60)
             raise ValueError(f"Input validation failed: {e}")
         
@@ -84,7 +108,7 @@ class AzureOpenAIClient:
                 
                 response = self.client.chat.completions.create(
                     model=self.deployment_name,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[{"role": "user", "content": prompt_to_send}],  # Use cleaned prompt
                     temperature=temperature,
                     max_tokens=max_tokens
                 )
@@ -134,18 +158,22 @@ if __name__ == "__main__":
     
     client = AzureOpenAIClient()
     
-    # Test prompts - secrets/PII in INPUT will be blocked BEFORE sending
+    # Test prompts - secrets/PII will be AUTO-REDACTED
     prompts = [
         {
-            "name": "❌ Prompt with API key (should be BLOCKED)",
+            "name": "Prompt with API key (will be redacted)",
             "text": "Review this code:\nimport os\nif __name__ == '__main__':\n    mykey = 'sk-abc123def456ghi789jkl012mno345pqr678stu901vwx234yz'\n    print(mykey)"
         },
         {
-            "name": "❌ Prompt with email (should be BLOCKED)",
+            "name": "Prompt with git commit hash (false positive - will be redacted)",
+            "text": "Review this git commit:\ncommit 4a5f6e8d9c1b2a3e4f5a6b7c8d9e0f1a2b3c4d5e\nAuthor: Developer\nDate: 2024-10-20\n\nFixed bug in authentication"
+        },
+        {
+            "name": "Prompt with email (will be redacted)",
             "text": "Review this code:\nimport os\n# contact codeguy@example.com with questions\nif __name__ == '__main__':\n    print('Hello World')"
         },
         {
-            "name": "✅ Clean prompt (should PASS)",
+            "name": "Clean prompt (no changes)",
             "text": "Explain what this code does:\nimport os\nif __name__ == '__main__':\n    print('Hello World')"
         }
     ]
@@ -162,10 +190,8 @@ if __name__ == "__main__":
                 temperature=0.7,
                 max_tokens=150
             )
-            logging.info(f"✅ SUCCESS - Received response")
+            logging.info(f"✅ SUCCESS - Prompt sent (possibly redacted)")
             
-        except ValueError as e:
-            logging.info(f"⚠️  Expected behavior - input blocked locally")
         except Exception as e:
             logging.error(f"❌ Unexpected error: {e}")
         
